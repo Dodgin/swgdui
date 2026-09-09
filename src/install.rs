@@ -5,7 +5,7 @@
 //! when there was none) and refuses to touch a file changed since install.
 
 use crate::settings::{Rgb, Settings, PROFESSIONS};
-use crate::templates;
+use crate::{keymap, templates};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const BACKUP_EXT: &str = ".pre-unitframes";
+pub const STOCK_ICON_MARGIN: &str = "1,2,2,2";
 pub const STYLES_FILE: &str = r"ui\ui_styles.inc";
 pub const SWATCH_NAME: &str = "ui_class_swatch";
 pub const SWATCH_FILE: &str = r"texture\ui_class_swatch.dds";
@@ -83,6 +84,10 @@ pub struct Rendered {
     pub files: BTreeMap<String, Vec<u8>>,
     #[allow(dead_code)]
     pub health: Rgb,
+    /// the keymap the action bar labels came from, if one was found
+    pub keymap: Option<PathBuf>,
+    /// why there is none (labels left blank)
+    pub keymap_err: Option<String>,
 }
 
 /// Fill the templates.  `styles_src` is the stock ui/ui_styles.inc (needed only
@@ -95,8 +100,16 @@ pub fn render(s: &Settings, styles_src: Option<&str>) -> Result<Rendered, String
         .ok_or_else(|| format!("location must be 'x,y', got '{}'", s.buff_location))?;
     let (dx, dy) = s.debuff_loc()?;
     let cell = s.buff_icon_size;
+    let ab_back = s.action_bar_backdrop()?;
+    let ab_key = s.action_bar_key()?;
+    let km = if s.action_bars { Some(keymap::for_settings(Path::new(&s.game_dir), &s.keymap_file)) } else { None };
+    let (keymap_path, km, keymap_err) = match km {
+        Some(Ok((p, k))) => (Some(p), k, None),
+        Some(Err(e)) => (None, keymap::Keymap::default(), Some(e)),
+        None => (None, keymap::Keymap::default(), None),
+    };
 
-    let tokens: Vec<(&str, String)> = vec![
+    let mut tokens: Vec<(&str, String)> = vec![
         ("@@HEALTH@@", health.hex()),
         ("@@HEALTH_BG@@", health.scale(s.backdrop_mul).hex()),
         ("@@TARGET_HEALTH@@", target.hex()),
@@ -114,14 +127,34 @@ pub fn render(s: &Settings, styles_src: Option<&str>) -> Result<Rendered, String
         ("@@DEBUFFS_ROWS@@", s.debuff_rows.to_string()),
         ("@@DEBUFFS_GW@@", (s.debuff_columns * cell).to_string()),
         ("@@DEBUFFS_GH@@", (s.debuff_rows * cell).to_string()),
+        ("@@AB_BACK@@", ab_back.hex()),
+        ("@@AB_BACK_OPACITY@@", format!("{:.2}", if s.action_bar_backdrop { s.action_bar_backdrop_opacity.clamp(0.0, 1.0) } else { 0.0 })),
+        ("@@AB_KEY_COLOR@@", ab_key.hex()),
+        ("@@AB_QUEUE_VISIBLE@@", if s.action_bar_queue_bar { "true".into() } else { "false".into() }),
+        // the stock value: the client applies this to every icon it lays out (a
+        // negative margin moved icons everywhere without scaling them), so it stays
+        ("@@AB_ICON_MARGIN@@", STOCK_ICON_MARGIN.into()),
     ];
+    let key_tokens: Vec<(String, String)> = (12..24)
+        .map(|i| (format!("@@AB_KEY_{i}@@"), km.slot(i)))
+        .chain((0..9).map(|i| (format!("@@AB_PET_KEY_{i}@@"), km.pet_slot(i))))
+        .collect();
+    for (k, v) in &key_tokens {
+        tokens.push((k.as_str(), v.clone()));
+    }
 
-    let unreplaced = Regex::new("@@[A-Z_]+@@").unwrap();
+    let unreplaced = Regex::new("@@[A-Z_0-9]+@@").unwrap();
     let mut files = BTreeMap::new();
+    let mut pages: Vec<(&str, &str)> = Vec::new();
     for f in templates::PAGES {
-        let mut text = templates::get(f, s.inline_buffs, s.role_colors)
-            .ok_or_else(|| format!("template missing: {f}"))?
-            .to_string();
+        pages.push((f, templates::get(f, s.inline_buffs, s.role_colors).ok_or_else(|| format!("template missing: {f}"))?));
+    }
+    if s.action_bars {
+        pages.push((templates::TOOLBAR, templates::toolbar(s.action_bar_keybinds_inside)));
+        pages.push((templates::SIDE_TOOLBAR, templates::side_toolbar(s.action_bar_keybinds_inside)));
+    }
+    for (f, tpl) in pages {
+        let mut text = tpl.to_string();
         for (k, v) in &tokens {
             text = text.replace(k, v);
         }
@@ -146,7 +179,7 @@ pub fn render(s: &Settings, styles_src: Option<&str>) -> Result<Rendered, String
         }
         files.insert(SWATCH_FILE.to_string(), swatch_dds(&colours));
     }
-    Ok(Rendered { files, health })
+    Ok(Rendered { files, health, keymap: keymap_path, keymap_err })
 }
 
 /// Rewrite every ImageStyle inside `<Namespace Name='role'>` into a solid
@@ -280,7 +313,11 @@ pub fn remove(app_dir: &Path, game_dir_override: Option<&str>, force: bool) -> R
     let root = Path::new(&game_dir);
     let files: Vec<String> = match &manifest {
         Some(m) if !m.files.is_empty() => m.files.keys().cloned().collect(),
-        _ => templates::PAGES.iter().map(|f| format!("ui\\{f}")).collect(),
+        _ => templates::PAGES
+            .iter()
+            .chain([&templates::TOOLBAR, &templates::SIDE_TOOLBAR])
+            .map(|f| format!("ui\\{f}"))
+            .collect(),
     };
     let mut log = Vec::new();
     for rel in files {
@@ -330,11 +367,42 @@ mod tests {
     #[test]
     fn render_default_has_no_tokens() {
         let r = render(&Settings { role_colors: false, ..Settings::default() }, None).unwrap();
-        assert_eq!(r.files.len(), 6);
+        assert_eq!(r.files.len(), 8);
         for (_, b) in &r.files {
             assert!(!String::from_utf8_lossy(b).contains("@@"));
         }
         assert!(String::from_utf8_lossy(&r.files["ui\\ui_ground_hud_targets_skinned.inc"]).contains("#C74040"));
+        let tb = String::from_utf8_lossy(&r.files["ui\\ui_ground_hud_toolbar_skinned.inc"]);
+        assert!(tb.contains("BackgroundTint='#0F0F0F'"));
+        assert!(tb.contains("BackgroundOpacity='0.00'"), "backdrop off by default");
+        assert!(tb.contains("TextAlignmentVertical='Top'"));
+        assert!(tb.contains("IconMargin='1,2,2,2'"));
+        assert!(tb.contains("Visible='false'"));
+        assert!(tb.contains("Name='volumeBorders'"));
+        assert!(tb.contains(">Q</Text>") || tb.contains("></Text>"), "static labels are element bodies");
+        let side = String::from_utf8_lossy(&r.files["ui\\ui_ground_hud_side_toolbar_skinned.inc"]);
+        assert_eq!(side.matches("Name='volumeBorders'").count(), 4);
+        assert!(side.contains("sideIconMargin='1,2,2,2'"));
+    }
+
+    #[test]
+    fn backdrop_and_queue_bar_tokens() {
+        let s = Settings { role_colors: false, action_bar_backdrop: true, action_bar_queue_bar: true, ..Settings::default() };
+        let r = render(&s, None).unwrap();
+        let tb = String::from_utf8_lossy(&r.files["ui\\ui_ground_hud_toolbar_skinned.inc"]);
+        assert!(tb.contains("BackgroundOpacity='0.80'"));
+        assert_eq!(tb.matches("Visible='true'").count(), 2, "throttlePage in both pages");
+    }
+
+    #[test]
+    fn render_without_action_bars_or_with_key_row() {
+        let base = Settings { role_colors: false, ..Settings::default() };
+        let r = render(&Settings { action_bars: false, ..base.clone() }, None).unwrap();
+        assert_eq!(r.files.len(), 6);
+        let r = render(&Settings { action_bar_keybinds_inside: false, ..base }, None).unwrap();
+        let tb = String::from_utf8_lossy(&r.files["ui\\ui_ground_hud_toolbar_skinned.inc"]);
+        assert!(!tb.contains("TextAlignmentVertical='Top'"));
+        assert!(tb.contains("CellSize='36,12'"));
     }
 
     #[test]

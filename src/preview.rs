@@ -104,6 +104,11 @@ pub struct Palette {
     pub role_colors: bool,
     /// class colour shown in the player bar when role colours are on
     pub role_fill: Rgb,
+    pub ab_backdrop: bool,
+    pub ab_back: Rgb,
+    pub ab_back_opacity: f32,
+    pub ab_key: Rgb,
+    pub ab_queue: bool,
 }
 
 impl Palette {
@@ -120,6 +125,11 @@ impl Palette {
             power_bg: power.scale(s.backdrop_mul),
             role_colors: s.role_colors,
             role_fill: s.class_color(preview_class),
+            ab_backdrop: s.action_bar_backdrop,
+            ab_back: s.action_bar_backdrop().unwrap_or(Rgb(0x0F, 0x0F, 0x0F)),
+            ab_back_opacity: s.action_bar_backdrop_opacity as f32,
+            ab_key: s.action_bar_key().unwrap_or(Rgb(0xFF, 0xFF, 0xFF)),
+            ab_queue: s.action_bar_queue_bar,
         }
     }
 }
@@ -425,8 +435,223 @@ pub fn draw_nameplate(cv: &Canvas, p: &Palette, s: &Sample, center_x: f32) -> f3
     y
 }
 
+// ---- action bar geometry (build_actionbars.py) ----
+const AB_BTN: f32 = 36.0;
+const AB_SP: f32 = 2.0;
+const AB_PITCH: f32 = AB_BTN + AB_SP;
+const AB_COLS: u32 = 12;
+const AB_PET_COLS: u32 = 9;
+const AB_EDGE: f32 = 3.0; // 1px border + 2px padding
+const AB_PANE_W: f32 = 14.0;
+const AB_GAP: f32 = 2.0;
+const AB_THR_H: f32 = 4.0;
+const AB_KEY_H: f32 = 12.0;
+const AB_SLOT_FILL: Rgb = Rgb(0x1A, 0x1A, 0x1A);
+const AB_KEYS: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="];
+/// stand-in icon tints; the game draws its own 36px art
+const AB_ICONS: [Rgb; 12] = [
+    Rgb(0xB0, 0x45, 0x30), Rgb(0xC8, 0x8A, 0x2E), Rgb(0x3F, 0x8C, 0xC4), Rgb(0x5E, 0x9E, 0x4B),
+    Rgb(0x8E, 0x5B, 0xB8), Rgb(0xC4, 0x3A, 0x3A), Rgb(0x2E, 0x9A, 0x9A), Rgb(0xA8, 0xA8, 0x40),
+    Rgb(0x70, 0x70, 0x70), Rgb(0x30, 0x60, 0xA0), Rgb(0x1A, 0x1A, 0x1A), Rgb(0x1A, 0x1A, 0x1A),
+];
+
+/// Window size of the main bar for `rows` (1 = Toolbar, 2 = DoubleToolbar).
+pub fn actionbar_size(rows: u32, keys_inside: bool) -> (f32, f32) {
+    let icons_w = AB_COLS as f32 * AB_BTN + (AB_COLS - 1) as f32 * AB_SP;
+    let icons_h = rows as f32 * AB_BTN + (rows - 1) as f32 * AB_SP;
+    let w = AB_EDGE + AB_PANE_W + AB_GAP + icons_w + AB_GAP + AB_BTN + AB_EDGE;
+    let mut h = AB_EDGE + AB_THR_H + AB_GAP + icons_h + AB_EDGE;
+    if !keys_inside {
+        h += 1.0 + AB_KEY_H;
+        if rows == 2 {
+            h += AB_KEY_H + 1.0;
+        }
+    }
+    (w, h)
+}
+
+pub fn petbar_size(keys_inside: bool) -> (f32, f32) {
+    let w = AB_EDGE + AB_PET_COLS as f32 * AB_BTN + (AB_PET_COLS - 1) as f32 * AB_SP + AB_EDGE;
+    (w, AB_EDGE + AB_BTN + AB_EDGE + if keys_inside { 0.0 } else { 1.0 + AB_KEY_H })
+}
+
+/// Keybind labels the preview shows: slots 0-23 of the main bar and 0-8 of
+/// the pet bar.  In game the client labels 0-11 itself; the rest are baked
+/// from the keymap, so the preview reads them from the same keymap.
+pub struct KeyLabels {
+    pub slots: [String; 24],
+    pub pet: [String; 9],
+}
+
+impl KeyLabels {
+    /// From a keymap; with none, the number row stands in for slots 0-11.
+    pub fn from_keymap(km: Option<&crate::keymap::Keymap>) -> KeyLabels {
+        let mut slots: [String; 24] = Default::default();
+        let mut pet: [String; 9] = Default::default();
+        match km {
+            Some(k) => {
+                for (i, s) in slots.iter_mut().enumerate() {
+                    *s = k.slot(i as u32);
+                }
+                for (i, s) in pet.iter_mut().enumerate() {
+                    *s = k.pet_slot(i as u32);
+                }
+            }
+            None => {
+                for (i, s) in slots.iter_mut().take(12).enumerate() {
+                    *s = AB_KEYS[i].to_string();
+                }
+            }
+        }
+        KeyLabels { slots, pet }
+    }
+}
+
+fn ab_backdrop(cv: &Canvas, p: &Palette, w: f32, h: f32) {
+    if !p.ab_backdrop {
+        return;
+    }
+    let a = (p.ab_back_opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+    cv.fill_a(0.0, 0.0, w, h, Rgb(0, 0, 0), a);
+    cv.fill_a(1.0, 1.0, w - 2.0, h - 2.0, p.ab_back, a);
+}
+
+/// One slot: dark box, icon stand-in (the client's 36px art inset by its stock
+/// 1,2,2,2 margin), cooldown sweep, a 1px black frame on top, keybind label.
+fn ab_slot(cv: &Canvas, p: &Palette, x: f32, y: f32, icon: Option<Rgb>, cooldown: f32, key: Option<&str>) {
+    cv.fill(x, y, AB_BTN, AB_BTN, AB_SLOT_FILL);
+    if let Some(c) = icon {
+        let clip = cv.painter.with_clip_rect(cv.r(x, y, AB_BTN, AB_BTN).intersect(cv.painter.clip_rect()));
+        let ir = cv.r(x + 1.0, y + 2.0, AB_BTN - 3.0, AB_BTN - 4.0);
+        clip.rect_filled(ir, 0.0, c32(c));
+        // icon art has a transparent margin: an inner disc on a darker ring stands in for it
+        let ring = ir.shrink(ir.width() * 0.08);
+        clip.rect_filled(ring, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 40));
+        clip.circle_filled(ir.center(), ir.width() * 0.28, Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 70));
+    }
+    if cooldown > 0.0 {
+        // the client's pie: black at 60% sweeping clockwise from 12 o'clock
+        let rect = cv.r(x + 1.0, y + 1.0, AB_BTN - 2.0, AB_BTN - 2.0);
+        let c = rect.center();
+        let half = rect.width() / 2.0;
+        let mut pts = vec![c];
+        let steps = 40;
+        for i in 0..=steps {
+            let a = -std::f32::consts::FRAC_PI_2 + cooldown * std::f32::consts::TAU * i as f32 / steps as f32;
+            let (sx, sy) = (a.cos(), a.sin());
+            let t = half / sx.abs().max(sy.abs());
+            pts.push(Pos2::new(c.x + sx * t, c.y + sy * t));
+        }
+        cv.painter.add(egui::Shape::convex_polygon(pts, Color32::from_rgba_unmultiplied(0, 0, 0, 150), Stroke::NONE));
+    }
+    // the volumeBorders overlay: 1px frame above everything
+    cv.outline(x, y, AB_BTN, AB_BTN, Rgb(0, 0, 0));
+    if let Some(k) = key.filter(|k| !k.is_empty()) {
+        cv.text(x, y, AB_BTN - 2.0, 13.0, Align2::RIGHT_CENTER, 11.0, p.ab_key, k);
+    }
+}
+
+fn ab_key_row(cv: &Canvas, p: &Palette, x_icons: f32, y: f32, keys: &[String]) {
+    for (col, k) in keys.iter().enumerate() {
+        let x = x_icons + col as f32 * AB_PITCH;
+        cv.text(x, y, AB_BTN, AB_KEY_H, Align2::CENTER_CENTER, 11.0, p.ab_key, k);
+    }
+}
+
+/// The main bar: [pane column][12 slots per row][big default-attack button],
+/// optional queue bar on top.  The double toolbar's bottom row is slots 0-11.
+pub fn draw_actionbar(cv: &Canvas, p: &Palette, rows: u32, keys_inside: bool, keys: &KeyLabels) {
+    let (w, h) = actionbar_size(rows, keys_inside);
+    ab_backdrop(cv, p, w, h);
+    let icons_w = AB_COLS as f32 * AB_BTN + (AB_COLS - 1) as f32 * AB_SP;
+    let icons_h = rows as f32 * AB_BTN + (rows - 1) as f32 * AB_SP;
+    let x_icons = AB_EDGE + AB_PANE_W + AB_GAP;
+    let mut y_icons = AB_EDGE + AB_THR_H + AB_GAP;
+    if rows == 2 && !keys_inside {
+        // the top row's labels sit above it
+        ab_key_row(cv, p, x_icons, y_icons, &keys.slots[12..24]);
+        y_icons += AB_KEY_H + 1.0;
+    }
+
+    if p.ab_queue {
+        cv.fill(x_icons, AB_EDGE, icons_w, AB_THR_H, p.power_bg);
+        cv.fill(x_icons, AB_EDGE, (icons_w * 0.7).round(), AB_THR_H, p.power);
+    }
+
+    // pane number + prev / next
+    cv.text(AB_EDGE, y_icons, AB_PANE_W, 14.0, Align2::CENTER_CENTER, 11.0, p.ab_key, "1");
+    for (i, up) in [(0, true), (1, false)] {
+        let r = cv.r(AB_EDGE + 3.0, y_icons + 14.0 + i as f32 * 11.0 + 2.0, AB_PANE_W - 6.0, 7.0);
+        let tri = if up {
+            [r.left_bottom(), r.right_bottom(), r.center_top()]
+        } else {
+            [r.left_top(), r.right_top(), r.center_bottom()]
+        };
+        cv.painter.add(egui::Shape::convex_polygon(tri.to_vec(), Color32::from_rgb(0xA0, 0xC8, 0xD0), Stroke::NONE));
+    }
+
+    for row in 0..rows {
+        let y = y_icons + row as f32 * AB_PITCH;
+        let bottom = row + 1 == rows;
+        for col in 0..AB_COLS {
+            let x = x_icons + col as f32 * AB_PITCH;
+            let i = col as usize;
+            let slot = if bottom { i } else { 12 + i };
+            let icon = if bottom { (i < 10).then_some(AB_ICONS[i]) } else { (i % 3 != 2).then_some(AB_ICONS[(i + 5) % 12]) };
+            let cd = if bottom && i == 2 { 0.65 } else if bottom && i == 5 { 0.3 } else { 0.0 };
+            let key = keys_inside.then_some(keys.slots[slot].as_str());
+            ab_slot(cv, p, x, y, icon, cd, key);
+        }
+    }
+    if !keys_inside {
+        ab_key_row(cv, p, x_icons, y_icons + icons_h + 1.0, &keys.slots[0..12]);
+    }
+
+    // big default-attack button
+    let x_big = x_icons + icons_w + AB_GAP;
+    let y_big = y_icons + ((icons_h - AB_BTN) / 2.0).floor();
+    ab_slot(cv, p, x_big, y_big, Some(Rgb(0xC4, 0x3A, 0x3A)), 0.0, None);
+}
+
+/// Bars 3-6: a vertical 1x12 SideToolbar window.  The client fills its
+/// twelve labels; the preview shows the number row as a stand-in.
+pub fn sidebar_size(keys_inside: bool) -> (f32, f32) {
+    let w = AB_EDGE + AB_BTN + AB_EDGE + if keys_inside { 0.0 } else { 1.0 + 15.0 };
+    (w, AB_EDGE + 12.0 * AB_BTN + 11.0 * AB_SP + AB_EDGE)
+}
+
+pub fn draw_sidebar(cv: &Canvas, p: &Palette, keys_inside: bool) {
+    let (w, h) = sidebar_size(keys_inside);
+    ab_backdrop(cv, p, w, h);
+    for row in 0..12u32 {
+        let i = row as usize;
+        let y = AB_EDGE + row as f32 * AB_PITCH;
+        let icon = (i % 4 != 3).then_some(AB_ICONS[(i + 7) % 12]);
+        let key = keys_inside.then_some(AB_KEYS[i]);
+        ab_slot(cv, p, AB_EDGE, y, icon, if i == 4 { 0.4 } else { 0.0 }, key);
+        if !keys_inside {
+            cv.text(AB_EDGE + AB_BTN + 1.0, y, 15.0, AB_BTN, Align2::CENTER_CENTER, 11.0, p.ab_key, AB_KEYS[i]);
+        }
+    }
+}
+
+/// The pet bar: 9 slots in the same skin, labels from the keymap.
+pub fn draw_petbar(cv: &Canvas, p: &Palette, keys_inside: bool, keys: &KeyLabels) {
+    let (w, h) = petbar_size(keys_inside);
+    ab_backdrop(cv, p, w, h);
+    for col in 0..AB_PET_COLS {
+        let i = col as usize;
+        let icon = (i < 4).then_some(AB_ICONS[(i + 3) % 12]);
+        let key = keys_inside.then_some(keys.pet[i].as_str());
+        ab_slot(cv, p, AB_EDGE + col as f32 * AB_PITCH, AB_EDGE, icon, if i == 1 { 0.5 } else { 0.0 }, key);
+    }
+    if !keys_inside {
+        ab_key_row(cv, p, AB_EDGE, AB_EDGE + AB_BTN + 1.0, &keys.pet);
+    }
+}
+
 /// Lay out every frame in one scrollable area and return the size used.
-pub fn draw_all(ui: &mut Ui, s: &Settings, preview_class: &str, scale: f32) {
+pub fn draw_all(ui: &mut Ui, s: &Settings, preview_class: &str, scale: f32, keys: &KeyLabels) {
     let p = Palette::from(s, preview_class);
     let sample = &SAMPLE;
     let cell = s.buff_icon_size as f32;
@@ -441,14 +666,20 @@ pub fn draw_all(ui: &mut Ui, s: &Settings, preview_class: &str, scale: f32) {
     let grid_w = (s.buff_columns.max(s.debuff_columns) as f32 * cell).max(FRAME_W);
     let np_h = 13.0 + 17.0 + 18.0 + 14.0;
     let group_h = GROUP_SAMPLE.len() as f32 * GROUP_ROW_H;
-    let total_h = 14.0 + BODY_H + 4.0 + buff_h + gap
+    let (ab_w, ab_h) = actionbar_size(1, s.action_bar_keybinds_inside);
+    let (_, ab2_h) = actionbar_size(2, s.action_bar_keybinds_inside);
+    let (_, pet_h) = petbar_size(s.action_bar_keybinds_inside);
+    let (_, side_h) = sidebar_size(s.action_bar_keybinds_inside);
+    let ab_total = if s.action_bars { 14.0 + ab_h + gap + 14.0 + ab2_h + gap + 14.0 + pet_h.max(side_h) + gap } else { 0.0 };
+    let total_h = ab_total
+        + 14.0 + BODY_H + 4.0 + buff_h + gap
         + 14.0 + BODY_H + gap
         + 14.0 + BODY_H + gap
         + 14.0 + group_h + gap
         + 14.0 + PET_H + gap
         + 14.0 + np_h + gap
         + 14.0 + BODY_H;
-    let total_w = grid_w.max(FRAME_W) + 8.0;
+    let total_w = grid_w.max(FRAME_W).max(if s.action_bars { ab_w } else { 0.0 }) + 8.0;
 
     let (resp, painter) = ui.allocate_painter(Vec2::new(total_w * scale, total_h * scale), egui::Sense::hover());
     let origin = resp.rect.min;
@@ -463,6 +694,26 @@ pub fn draw_all(ui: &mut Ui, s: &Settings, preview_class: &str, scale: f32) {
     };
 
     let mut y = 0.0;
+    if s.action_bars {
+        label(y, "Action bar");
+        y += 14.0;
+        let cv = Canvas::new(&painter, origin + Vec2::new(0.0, y * scale), scale);
+        draw_actionbar(&cv, &p, 1, s.action_bar_keybinds_inside, keys);
+        y += ab_h + gap;
+        label(y, "Double toolbar (Options > Interface)");
+        y += 14.0;
+        let cv = Canvas::new(&painter, origin + Vec2::new(0.0, y * scale), scale);
+        draw_actionbar(&cv, &p, 2, s.action_bar_keybinds_inside, keys);
+        y += ab2_h + gap;
+        label(y, "Pet bar                                                                  Bars 3-6 (side toolbars)");
+        y += 14.0;
+        let cv = Canvas::new(&painter, origin + Vec2::new(0.0, y * scale), scale);
+        draw_petbar(&cv, &p, s.action_bar_keybinds_inside, keys);
+        let (pw, _) = petbar_size(s.action_bar_keybinds_inside);
+        let cv = Canvas::new(&painter, origin + Vec2::new((pw + 24.0) * scale, y * scale), scale);
+        draw_sidebar(&cv, &p, s.action_bar_keybinds_inside);
+        y += pet_h.max(side_h) + gap;
+    }
     label(y, "Player frame");
     y += 14.0;
     let cv = Canvas::new(&painter, origin + Vec2::new(0.0, y * scale), scale);
@@ -591,7 +842,7 @@ fn drag_window(ui: &mut Ui, id: egui::Id, rect: Rect, scale: f32, cur: (i32, i32
 /// Frames are laid out in the client's UI coordinate space (screen / UI scale)
 /// at the stock bottom-centre positions; the buff windows use their configured
 /// coordinates, so this shows where they land at each resolution.
-pub fn draw_screen(ui: &mut Ui, s: &mut Settings, preview_class: &str, res: (u32, u32), ui_scale: f32, zoom: f32, width: f32) {
+pub fn draw_screen(ui: &mut Ui, s: &mut Settings, preview_class: &str, res: (u32, u32), ui_scale: f32, zoom: f32, width: f32, keys: &KeyLabels, double: bool) {
     let p = Palette::from(s, preview_class);
     let sample = &SAMPLE;
     let ui_scale = ui_scale.max(0.25);
@@ -669,6 +920,19 @@ pub fn draw_screen(ui: &mut Ui, s: &mut Settings, preview_class: &str, res: (u32
         cv.outline(0.0, 0.0, dw, dh, red);
         draw_icon_grid(&cv, 0.0, 0.0, s.debuff_columns, s.debuff_rows, cell, 2, red);
         cv.text(2.0, dh, 200.0, 10.0, Align2::LEFT_CENTER, 8.0, TEXT_DIM, &format!("debuffs {dx},{dy}"));
+    }
+
+    // action bars at the page default: bottom centre, pet bar just above
+    if s.action_bars {
+        let rows = if double { 2 } else { 1 };
+        let (w, h) = actionbar_size(rows, s.action_bar_keybinds_inside);
+        let (pw, ph) = petbar_size(s.action_bar_keybinds_inside);
+        let ab_y = uh - h - 4.0;
+        draw_actionbar(&at(((uw - w) / 2.0).round(), ab_y), &p, rows, s.action_bar_keybinds_inside, keys);
+        draw_petbar(&at(((uw - pw) / 2.0).round(), ab_y - ph - 4.0), &p, s.action_bar_keybinds_inside, keys);
+        // one side bar at its stock spot (right edge, mid-height)
+        let (sw_, _) = sidebar_size(s.action_bar_keybinds_inside);
+        draw_sidebar(&at(uw - sw_ - 4.0, (uh * 0.42).round()), &p, s.action_bar_keybinds_inside);
     }
 
     // group window at the client's default spot (left edge, below the top), pet by the player frame

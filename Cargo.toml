@@ -3,7 +3,7 @@ name = "dodgins-ui-mod"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.86"
-description = "Installer + live preview for Dodgin's ElvUI-style SWG Legends unitframes"
+description = "Installer + live preview for Dodgin's ElvUI-style SWG Legends unitframes and action bars"
 
 [[bin]]
 name = "dodgins-ui-mod"

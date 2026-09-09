@@ -118,6 +118,43 @@ pub fn read_opt_int(path: &Path, section: &str, key: &str) -> Option<i32> {
     out
 }
 
+/// A BOOL out of an options IFF (`BOOL` leaf: one byte then `section\0key\0`).
+pub fn read_opt_bool(path: &Path, section: &str, key: &str) -> Option<bool> {
+    let d = std::fs::read(path).ok()?;
+    fn walk(d: &[u8], mut off: usize, end: usize, want: &(String, String), out: &mut Option<bool>) {
+        while off + 8 <= end && out.is_none() {
+            let tag = &d[off..off + 4];
+            let size = u32::from_be_bytes([d[off + 4], d[off + 5], d[off + 6], d[off + 7]]) as usize;
+            let body_end = (off + 8 + size).min(end);
+            if tag == b"FORM" {
+                walk(d, off + 12, body_end, want, out);
+            } else if tag == b"BOOL" && size >= 1 {
+                let body = &d[off + 8..body_end];
+                let mut tail = &body[1..];
+                while let Some(t) = tail.strip_suffix(b"\0") {
+                    tail = t;
+                }
+                let parts: Vec<&[u8]> = tail.split(|b| *b == 0).collect();
+                if parts.len() >= 2 {
+                    let (sec, k) = (parts[parts.len() - 2], parts[parts.len() - 1]);
+                    if sec.eq_ignore_ascii_case(want.0.as_bytes()) && k.eq_ignore_ascii_case(want.1.as_bytes()) {
+                        *out = Some(body[0] != 0);
+                    }
+                }
+            }
+            off = off + 8 + size;
+        }
+    }
+    let mut out = None;
+    walk(&d, 0, d.len(), &(section.to_string(), key.to_string()), &mut out);
+    out
+}
+
+/// Options > Interface > double toolbar (`useDoubleToolbar` in local_machine_options.iff).
+pub fn use_double_toolbar(game_dir: &Path) -> Option<bool> {
+    read_opt_bool(&game_dir.join("local_machine_options.iff"), "ClientUserInterface", "useDoubleToolbar")
+}
+
 /// Every per-character options file under `profiles/<user>/<cluster>/*.opt`.
 pub fn all_opts(game_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

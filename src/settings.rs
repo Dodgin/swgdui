@@ -100,6 +100,19 @@ pub struct Settings {
     /// preview only: the client's buff icon sliders for the pet and group windows
     pub pet_icon_size: u32,
     pub group_icon_size: u32,
+    /// ElvUI-style action bars (ui_ground_hud_toolbar_skinned.inc)
+    pub action_bars: bool,
+    /// keybind labels in the top-right corner of each button, else in a row under the bar
+    pub action_bar_keybinds_inside: bool,
+    /// draw the backdrop panel behind the buttons (off = buttons only)
+    pub action_bar_backdrop: bool,
+    pub action_bar_backdrop_color: String,
+    pub action_bar_backdrop_opacity: f64,
+    pub action_bar_key_color: String,
+    /// the action-queue timer strip along the top of the bar
+    pub action_bar_queue_bar: bool,
+    /// keymap (.inp) the top-row / pet labels are read from; "" = newest in profiles/
+    pub keymap_file: String,
 }
 
 impl Default for Settings {
@@ -125,6 +138,14 @@ impl Default for Settings {
             ui_scale: 1.0,
             pet_icon_size: 16,
             group_icon_size: 16,
+            action_bars: true,
+            action_bar_keybinds_inside: true,
+            action_bar_backdrop: false,
+            action_bar_backdrop_color: "#0F0F0F".into(),
+            action_bar_backdrop_opacity: 0.8,
+            action_bar_key_color: "#FFFFFF".into(),
+            action_bar_queue_bar: false,
+            keymap_file: String::new(),
         }
     }
 }
@@ -177,6 +198,15 @@ impl Settings {
     pub fn power(&self) -> Result<Rgb, String> {
         Rgb::parse(&self.power_color)
             .ok_or_else(|| format!("PowerColor must be #RRGGBB, got '{}'", self.power_color))
+    }
+
+    pub fn action_bar_backdrop(&self) -> Result<Rgb, String> {
+        Rgb::parse(&self.action_bar_backdrop_color)
+            .ok_or_else(|| format!("ActionBarBackdropColor must be #RRGGBB, got '{}'", self.action_bar_backdrop_color))
+    }
+    pub fn action_bar_key(&self) -> Result<Rgb, String> {
+        Rgb::parse(&self.action_bar_key_color)
+            .ok_or_else(|| format!("ActionBarKeyColor must be #RRGGBB, got '{}'", self.action_bar_key_color))
     }
 
     pub fn parse_loc(s: &str) -> Option<(i32, i32)> {

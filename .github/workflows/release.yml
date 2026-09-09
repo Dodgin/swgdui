@@ -95,7 +95,7 @@ jobs:
         run: |
           prev=$(git describe --tags --abbrev=0 --match 'v*' "${{ needs.build.outputs.tag }}^" 2>/dev/null || true)
           {
-            echo "Dodgin's UI mod ${{ needs.build.outputs.version }} - installer and live preview for the ElvUI-style SWG Legends unitframes."
+            echo "Dodgin's UI mod ${{ needs.build.outputs.version }} - installer and live preview for the ElvUI-style SWG Legends unitframes and action bars."
             echo
             echo "Download the exe, put it anywhere, run it. Settings are kept next to the exe."
             echo

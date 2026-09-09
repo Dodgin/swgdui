@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! Dodgin's UI mod - installer and live preview for the ElvUI-style SWG
-//! unitframes (player, target, target-of-target, overhead nameplates).
+//! unitframes (player, target, target-of-target, group, pet, overhead
+//! nameplates) and action bars (toolbar, double toolbar, pet bar).
 //!
 //! Single exe: the templates and the stock stylesheet are embedded, and
 //! settings + install manifest live next to the executable.
@@ -8,12 +9,14 @@
 mod cfg;
 mod import;
 mod install;
+mod keymap;
 mod preview;
 mod settings;
 mod templates;
 
 use eframe::egui::{self, Color32, RichText};
 use install::Manifest;
+use preview::KeyLabels;
 use settings::{Rgb, Settings, PROFESSIONS};
 use std::path::PathBuf;
 
@@ -36,6 +39,11 @@ struct App {
     confirm_remove: bool,
     force_remove: bool,
     installed: Option<Manifest>,
+    /// the character keymap the action bar labels come from (path, parsed), or why there is none
+    keymap: Result<(PathBuf, keymap::Keymap), String>,
+    characters: Vec<keymap::Character>,
+    /// preview: show the double toolbar (the client's useDoubleToolbar option)
+    preview_double: bool,
 }
 
 impl App {
@@ -47,6 +55,9 @@ impl App {
         let preview_class = if s.profession.is_empty() { "jedi".into() } else { s.profession_key().into() };
         let mut app = App {
             installed: Manifest::load(&dir),
+            keymap: Err(String::new()),
+            characters: Vec::new(),
+            preview_double: cfg::use_double_toolbar(std::path::Path::new(&s.game_dir)).unwrap_or(false),
             saved: s.clone(),
             s,
             preview_class,
@@ -61,7 +72,19 @@ impl App {
         if fresh {
             app.import_from_game(&cc.egui_ctx);
         }
+        app.reload_keymap();
         app
+    }
+
+    /// Re-read the keymap the labels come from (settings' file, else the newest).
+    fn reload_keymap(&mut self) {
+        let gd = std::path::Path::new(&self.s.game_dir);
+        self.characters = keymap::find_characters(gd);
+        self.keymap = keymap::for_settings(gd, &self.s.keymap_file);
+    }
+
+    fn key_labels(&self) -> KeyLabels {
+        KeyLabels::from_keymap(self.keymap.as_ref().ok().map(|(_, k)| k))
     }
 
     /// Everything from the game folder in one go: resolution and UI scale from
@@ -74,6 +97,8 @@ impl App {
             return;
         }
         self.detect_from_game(ctx);
+        self.reload_keymap();
+        self.preview_double = cfg::use_double_toolbar(std::path::Path::new(&self.s.game_dir)).unwrap_or(self.preview_double);
         let gd = std::path::PathBuf::from(&self.s.game_dir);
         let cell = self.client_icon_size();
         match import::import_installed(&gd, &mut self.s, cell) {
@@ -151,6 +176,11 @@ impl App {
                 return;
             }
         };
+        match (&r.keymap, &r.keymap_err) {
+            (Some(k), _) => self.push_log(true, format!("action bar labels from {}", k.display())),
+            (None, Some(e)) => self.push_log(false, format!("top-row and pet-bar labels left empty: {e}")),
+            _ => {}
+        }
         match install::install(&self.dir, &self.s, &r) {
             Ok(lines) => {
                 for l in lines {
@@ -219,7 +249,7 @@ impl App {
 
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Dodgin's UI mod");
-        ui.label(RichText::new("ElvUI-style unitframes for SWG Legends").weak());
+        ui.label(RichText::new("ElvUI-style unitframes and action bars for SWG Legends").weak());
         ui.add_space(6.0);
 
         ui.group(|ui| {
@@ -340,11 +370,71 @@ impl App {
             });
         });
 
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.label(RichText::new("Action bars").strong());
+            ui.checkbox(&mut self.s.action_bars, "ElvUI-style toolbar, double toolbar and pet bar")
+                .on_hover_text("Replaces ui_ground_hud_toolbar_skinned.inc: 36px buttons 2px apart, each in a 1px black frame, icons zoomed to fill\nthe frame, keybind labels on every button, the pane number and pane buttons in a column at the left, the big\ndefault-attack button as one more slot at the right.  Off = the toolbar page is left alone (or put back).");
+            ui.add_enabled_ui(self.s.action_bars, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Keybind labels");
+                    ui.selectable_value(&mut self.s.action_bar_keybinds_inside, true, "top-right of the button")
+                        .on_hover_text("ElvUI placement: the label sits over the icon's top-right corner and lets clicks through.");
+                    ui.selectable_value(&mut self.s.action_bar_keybinds_inside, false, "row under the bar")
+                        .on_hover_text("The stock placement, restyled: a 12px row of labels under the buttons (above the top row of the double toolbar).");
+                });
+                Self::color_field(ui, "Label text", &mut self.s.action_bar_key_color, Rgb(0xFF, 0xFF, 0xFF));
+                ui.horizontal(|ui| {
+                    ui.label("Labels from keymap");
+                    let current = match &self.keymap {
+                        Ok((p, _)) => {
+                            let who = self.characters.iter().find(|c| c.inp.as_deref() == Some(p.as_path()));
+                            let name = who.map(|c| c.label()).unwrap_or_else(|| p.display().to_string());
+                            if self.s.keymap_file.trim().is_empty() { format!("last played: {name}") } else { name }
+                        }
+                        Err(e) => format!("none: {e}"),
+                    };
+                    let mut pick: Option<String> = None;
+                    egui::ComboBox::from_id_salt("keymap").width(360.0).selected_text(current).show_ui(ui, |ui| {
+                        if ui.selectable_label(self.s.keymap_file.trim().is_empty(), "last-played character (auto)").clicked() {
+                            pick = Some(String::new());
+                        }
+                        for c in &self.characters {
+                            let Some(p) = &c.inp else {
+                                ui.add_enabled(false, egui::Button::new(c.label()).frame(false));
+                                continue;
+                            };
+                            if ui.selectable_label(self.s.keymap_file == p.display().to_string(), c.label()).clicked() {
+                                pick = Some(p.display().to_string());
+                            }
+                        }
+                    });
+                    if let Some(v) = pick {
+                        self.s.keymap_file = v;
+                        self.reload_keymap();
+                    }
+                });
+                ui.label(RichText::new("The client labels slots 1-12 itself; the double toolbar's top row and the pet bar get the keys bound in this character's keymap (profiles\\...\\<id>.inp). Characters are listed by ID with when they last played (the files carry no names); the client only saves a keymap once a binding is changed, so a character still on a stock preset has none. Reinstall after rebinding.").weak().small());
+                ui.checkbox(&mut self.s.action_bar_backdrop, "Backdrop panel behind the buttons");
+                ui.add_enabled_ui(self.s.action_bar_backdrop, |ui| {
+                    Self::color_field(ui, "Backdrop", &mut self.s.action_bar_backdrop_color, Rgb(0x0F, 0x0F, 0x0F));
+                    ui.horizontal(|ui| {
+                        ui.label("Backdrop opacity");
+                        ui.add(egui::Slider::new(&mut self.s.action_bar_backdrop_opacity, 0.0..=1.0).fixed_decimals(2));
+                    });
+                });
+                ui.checkbox(&mut self.s.action_bar_queue_bar, "Queue timer bar along the top")
+                    .on_hover_text("The client's throttle bar: a strip in the action bar colour that fills while a queued ability waits\nfor the previous one to finish.  Off hides it.");
+                ui.label(RichText::new("Bars sit wherever you drag them in game.").weak().small());
+            });
+        });
+
         ui.add_space(8.0);
         let dirty = self.s != self.saved;
         ui.horizontal(|ui| {
             let can = install::is_game_dir(&self.s.game_dir) && self.s.health().is_ok()
-                && self.s.target_health().is_ok() && self.s.power().is_ok() && self.s.debuff_loc().is_ok();
+                && self.s.target_health().is_ok() && self.s.power().is_ok() && self.s.debuff_loc().is_ok()
+                && self.s.action_bar_backdrop().is_ok() && self.s.action_bar_key().is_ok();
             let label = if self.installed.is_some() { "Reinstall" } else { "Install" };
             if ui.add_enabled(can, egui::Button::new(RichText::new(label).strong())).clicked() {
                 self.do_install();
@@ -399,10 +489,11 @@ impl App {
 
 /// The screen mockup, sized from the panel width so the canvas keeps the
 /// display's aspect ratio (16:9 by default) instead of growing with the scroll area.
-fn preview_screen_block(ui: &mut egui::Ui, s: &mut Settings, class: &str, res: (u32, u32), ui_scale: f32, zoom: f32, width: f32) {
+#[allow(clippy::too_many_arguments)]
+fn preview_screen_block(ui: &mut egui::Ui, s: &mut Settings, class: &str, res: (u32, u32), ui_scale: f32, zoom: f32, width: f32, keys: &KeyLabels, double: bool) {
     let bg = egui::Frame::new().stroke(egui::Stroke::new(1.0, Color32::from_gray(70)));
     bg.show(ui, |ui| {
-        preview::draw_screen(ui, s, class, res, ui_scale, zoom, width);
+        preview::draw_screen(ui, s, class, res, ui_scale, zoom, width, keys, double);
     });
 }
 
@@ -455,31 +546,34 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.add(egui::Slider::new(&mut self.screen_zoom, 1.0..=6.0).step_by(0.5).text("screen zoom"));
                 ui.separator();
+                ui.checkbox(&mut self.preview_double, "double toolbar").on_hover_text("the client's Options > Interface > double toolbar setting (read from local_machine_options.iff)");
+                ui.separator();
                 ui.checkbox(&mut self.show_closeups, "close-ups");
                 if self.show_closeups {
                     ui.add(egui::Slider::new(&mut self.scale, 1.0..=4.0).step_by(0.5).text("close-up zoom"));
                 }
             });
-            ui.label(RichText::new("Sample data; fonts and icon art stand in for the game's. Frames sit wherever you drag them in game (stock bottom-centre layout shown). Drag the buff / debuff windows to set their coordinates.").weak().small());
+            ui.label(RichText::new("Sample data; fonts and icon art stand in for the game's. Frames and bars sit wherever you drag them in game (stock bottom-centre layout shown). Drag the buff / debuff windows to set their coordinates.").weak().small());
             ui.separator();
             let (rw, rh) = preview::parse_resolution(&self.s.preview_resolution).unwrap_or((1920, 1080));
             let inner_w = ui.available_width() - 24.0;
             let ui_scale = self.s.ui_scale as f32;
             egui::ScrollArea::both().show(ui, |ui| {
-                preview_screen_block(ui, &mut self.s, &self.preview_class, (rw, rh), ui_scale, self.screen_zoom, inner_w);
+                let keys = self.key_labels();
+                preview_screen_block(ui, &mut self.s, &self.preview_class, (rw, rh), ui_scale, self.screen_zoom, inner_w, &keys, self.preview_double);
                 if self.show_closeups {
                     ui.add_space(10.0);
                     ui.label(RichText::new("Close-ups").strong());
                     let bg = egui::Frame::new().fill(Color32::from_rgb(0x2A, 0x2E, 0x33)).inner_margin(12.0);
                     bg.show(ui, |ui| {
-                        preview::draw_all(ui, &self.s, &self.preview_class, self.scale);
+                        preview::draw_all(ui, &self.s, &self.preview_class, self.scale, &keys);
                     });
                 }
             });
         });
 
         if self.confirm_remove {
-            egui::Window::new("Remove the unitframes?")
+            egui::Window::new("Remove the UI mod?")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
