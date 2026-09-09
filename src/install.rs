@@ -321,7 +321,15 @@ pub fn install(app_dir: &Path, s: &Settings, r: &Rendered) -> Result<Vec<String>
     let mut log = Vec::new();
     let mut manifest = Manifest { game_dir: s.game_dir.clone(), installed: now_iso(), files: BTreeMap::new() };
 
-    for (rel, bytes) in &r.files {
+    // The hud references ui_ground_hud_pet.inc, so it goes last: if a write
+    // fails partway through, the client is never left with a hud including a
+    // page that is not on disk (that pair does not boot).
+    let write_order = r
+        .files
+        .iter()
+        .filter(|(rel, _)| rel.as_str() != HUD_FILE)
+        .chain(r.files.iter().filter(|(rel, _)| rel.as_str() == HUD_FILE));
+    for (rel, bytes) in write_order {
         let target = root.join(rel);
         let backup = PathBuf::from(format!("{}{BACKUP_EXT}", target.display()));
         let ours_before = prev.as_ref().map(|m| m.files.contains_key(rel)).unwrap_or(false);
@@ -362,6 +370,21 @@ pub fn install(app_dir: &Path, s: &Settings, r: &Rendered) -> Result<Vec<String>
     Ok(log)
 }
 
+/// Every path the installer can write, whatever the settings.  The hud comes
+/// first: it must stop referencing the pet page before that page is removed.
+pub fn all_installable() -> Vec<String> {
+    let mut v = vec![HUD_FILE.to_string()];
+    v.extend(
+        templates::PAGES
+            .iter()
+            .chain([&templates::TOOLBAR, &templates::SIDE_TOOLBAR])
+            .map(|f| format!("ui\\{f}")),
+    );
+    v.push(STYLES_FILE.to_string());
+    v.push(SWATCH_FILE.to_string());
+    v
+}
+
 /// Put the previous files back.  `force` overrides the changed-since-install check.
 pub fn remove(app_dir: &Path, game_dir_override: Option<&str>, force: bool) -> Result<Vec<String>, String> {
     let manifest = Manifest::load(app_dir);
@@ -373,15 +396,22 @@ pub fn remove(app_dir: &Path, game_dir_override: Option<&str>, force: bool) -> R
         return Err(format!("Not a SWG Legends install (no legends.cfg): {game_dir}"));
     }
     let root = Path::new(&game_dir);
-    let files: Vec<String> = match &manifest {
+    // The manifest records the last install this app dir made.  It is not the
+    // whole story: an install from another copy of the exe, or one that failed
+    // before rewriting the manifest, leaves files it does not list, and those
+    // used to survive Remove and keep the UI patched.  Force sweeps everything
+    // the installer can write; otherwise take the manifest plus the hud, which
+    // must never outlive the pet page it includes.
+    let mut files: Vec<String> = match &manifest {
         Some(m) if !m.files.is_empty() => m.files.keys().cloned().collect(),
-        _ => templates::PAGES
-            .iter()
-            .chain([&templates::TOOLBAR, &templates::SIDE_TOOLBAR])
-            .map(|f| format!("ui\\{f}"))
-            .chain([HUD_FILE.to_string()])
-            .collect(),
+        _ => all_installable(),
     };
+    for extra in if force { all_installable() } else { vec![HUD_FILE.to_string()] } {
+        if !files.iter().any(|f| *f == extra) {
+            files.insert(0, extra);
+        }
+    }
+    files.sort_by_key(|f| (f != HUD_FILE, f.clone()));
     let mut log = Vec::new();
     for rel in files {
         let target = root.join(&rel);
@@ -422,6 +452,25 @@ pub fn remove(app_dir: &Path, game_dir_override: Option<&str>, force: bool) -> R
             log.push(format!("removed {rel}"));
         }
     }
+    // Last line of defence.  Whatever happened above, the client will not start
+    // if ui_ground_hud.inc includes a pet page that is not there (stock ships no
+    // such file, it defines the pet window inline), so never leave that pair.
+    let hud = root.join(HUD_FILE);
+    let pet = root.join(format!(r"ui\{}", templates::PET));
+    if hud.is_file()
+        && !pet.is_file()
+        && std::fs::read_to_string(&hud).map(|t| t.contains(templates::PET)).unwrap_or(false)
+    {
+        let backup = PathBuf::from(format!("{}{BACKUP_EXT}", hud.display()));
+        if backup.exists() {
+            std::fs::rename(&backup, &hud).map_err(|e| format!("restore {HUD_FILE}: {e}"))?;
+            log.push(format!("restored previous {HUD_FILE} (it referenced the removed pet page)"));
+        } else {
+            std::fs::remove_file(&hud).map_err(|e| format!("remove {HUD_FILE}: {e}"))?;
+            log.push(format!("removed {HUD_FILE}: it referenced the removed pet page and would not have loaded"));
+        }
+    }
+
     let _ = std::fs::remove_file(Manifest::path(app_dir));
     log.push("done; relog to load the previous UI".into());
     Ok(log)
@@ -467,6 +516,82 @@ mod tests {
         let tb = String::from_utf8_lossy(&r.files["ui\\ui_ground_hud_toolbar_skinned.inc"]);
         assert!(tb.contains("BackgroundOpacity='0.80'"));
         assert_eq!(tb.matches("Visible='true'").count(), 2, "throttlePage in both pages");
+    }
+
+    /// a throwaway game dir (legends.cfg + ui/) plus an app dir for the manifest
+    fn temp_dirs(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("dodgins-ui-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (game, app) = (base.join("game"), base.join("app"));
+        std::fs::create_dir_all(game.join("ui")).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(game.join("legends.cfg"), b"").unwrap();
+        (game, app)
+    }
+
+    fn installed(tag: &str) -> (PathBuf, PathBuf, Settings) {
+        let (game, app) = temp_dirs(tag);
+        let s = Settings { game_dir: game.display().to_string(), ..Settings::default() };
+        let r = render(&s, None).unwrap();
+        install(&app, &s, &r).unwrap();
+        (game, app, s)
+    }
+
+    /// A manifest from before the installer patched the hud must not leave the
+    /// hud behind once the pet page it includes is removed: that will not boot.
+    #[test]
+    fn remove_never_strands_the_hud() {
+        let (game, app, _) = installed("strand");
+        let hud = game.join(HUD_FILE);
+        let pet = game.join(format!(r"ui\{}", templates::PET));
+        assert!(hud.is_file() && pet.is_file());
+        assert!(std::fs::read_to_string(&hud).unwrap().contains(templates::PET));
+
+        // rewrite the manifest the way an older build left it: no hud entry
+        let mut m = Manifest::load(&app).unwrap();
+        m.files.remove(HUD_FILE);
+        std::fs::write(Manifest::path(&app), serde_json::to_string(&m).unwrap()).unwrap();
+
+        remove(&app, None, false).unwrap();
+        assert!(!pet.is_file(), "pet page removed");
+        assert!(!hud.is_file(), "hud must not survive the pet page it includes");
+        let _ = std::fs::remove_dir_all(game.parent().unwrap());
+    }
+
+    /// Force removes what this app dir never recorded: files from an install
+    /// made by another copy of the exe used to survive and stay patched.
+    #[test]
+    fn force_remove_sweeps_unrecorded_files() {
+        let (game, app, _) = installed("sweep");
+        std::fs::remove_file(Manifest::path(&app)).unwrap();
+        remove(&app, Some(&game.display().to_string()), true).unwrap();
+        for rel in all_installable() {
+            assert!(!game.join(&rel).exists(), "{rel} left behind");
+        }
+        let _ = std::fs::remove_dir_all(game.parent().unwrap());
+    }
+
+    /// A mod that already ships the hud include and its own pet page (Clean
+    /// UI's, say): both are backed up on install and both put back on remove,
+    /// so the include still resolves afterwards.
+    #[test]
+    fn remove_restores_a_third_party_hud() {
+        let (game, app) = temp_dirs("restore");
+        let theirs = patch_hud_pet(templates::STOCK_HUD).unwrap() + "\n<!-- theirs -->";
+        let their_pet = "<!-- their pet page -->";
+        std::fs::write(game.join(HUD_FILE), &theirs).unwrap();
+        std::fs::write(game.join(format!(r"ui\{}", templates::PET)), their_pet).unwrap();
+        let s = Settings { game_dir: game.display().to_string(), ..Settings::default() };
+        let r = render(&s, None).unwrap();
+        install(&app, &s, &r).unwrap();
+        remove(&app, None, true).unwrap();
+        assert_eq!(std::fs::read_to_string(game.join(HUD_FILE)).unwrap(), theirs, "their hud is back");
+        assert_eq!(
+            std::fs::read_to_string(game.join(format!(r"ui\{}", templates::PET))).unwrap(),
+            their_pet,
+            "their pet page is back, so the include still resolves"
+        );
+        let _ = std::fs::remove_dir_all(game.parent().unwrap());
     }
 
     #[test]

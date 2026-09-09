@@ -46,7 +46,11 @@ pet bar).
 * Settings (`settings.json`) and the install manifest (`installed.json`)
   live next to the exe.  Previous loose files are kept as
   `<file>.pre-unitframes`; Remove puts them back and refuses to touch a file
-  changed since install unless Force is ticked.
+  changed since install unless Force is ticked.  The manifest only records
+  what that copy of the exe installed, so Force sweeps every file the
+  installer can write, not just the recorded ones.  Remove never leaves a
+  `ui_ground_hud.inc` that includes a pet page which is no longer there: the
+  client will not start with a dangling include.
 
 ## Build
 
