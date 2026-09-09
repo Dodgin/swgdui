@@ -423,8 +423,8 @@ impl App {
                         ui.add(egui::Slider::new(&mut self.s.action_bar_backdrop_opacity, 0.0..=1.0).fixed_decimals(2));
                     });
                 });
-                ui.checkbox(&mut self.s.action_bar_queue_bar, "Queue timer bar along the top")
-                    .on_hover_text("The client's throttle bar: a strip in the action bar colour that fills while a queued ability waits\nfor the previous one to finish.  Off hides it.");
+                ui.checkbox(&mut self.s.action_bar_queue_bar, "Auto attack bar along the top")
+                    .on_hover_text("The client's throttle bar: a strip in the action bar colour that fills while a queued ability waits\nfor the previous one to finish.  On by default; off hides it.");
                 ui.label(RichText::new("Bars sit wherever you drag them in game.").weak().small());
             });
         });

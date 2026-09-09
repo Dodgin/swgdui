@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub const BACKUP_EXT: &str = ".pre-unitframes";
 pub const STOCK_ICON_MARGIN: &str = "1,2,2,2";
 pub const STYLES_FILE: &str = r"ui\ui_styles.inc";
+pub const HUD_FILE: &str = r"ui\ui_ground_hud.inc";
 pub const SWATCH_NAME: &str = "ui_class_swatch";
 pub const SWATCH_FILE: &str = r"texture\ui_class_swatch.dds";
 const SWATCH_CELL: u32 = 16;
@@ -164,6 +165,15 @@ pub fn render(s: &Settings, styles_src: Option<&str>) -> Result<Rendered, String
         files.insert(format!("ui\\{f}"), text.replace("\r\n", "\n").into_bytes());
     }
 
+    // The pet page is only loaded if ui_ground_hud.inc includes it; stock
+    // defines the pet window inline instead.  Patch whatever hud the client is
+    // using (a loose one from another mod, else the bundled stock copy).  A hud
+    // that already includes it (Clean UI, or ours from a previous install) is
+    // written back unchanged so it stays in the manifest.
+    let loose_hud = std::fs::read_to_string(Path::new(&s.game_dir).join(HUD_FILE)).ok();
+    let hud = patch_hud_pet(loose_hud.as_deref().unwrap_or(templates::STOCK_HUD))?;
+    files.insert(HUD_FILE.to_string(), hud.into_bytes());
+
     if s.role_colors {
         let styles: &str = styles_src.unwrap_or(templates::STOCK_STYLES);
         files.insert(STYLES_FILE.to_string(), patch_role_styles(styles)?.into_bytes());
@@ -211,6 +221,58 @@ pub fn patch_role_styles(styles: &str) -> Result<String, String> {
         return Err(format!("only {n} role styles found in ui_styles.inc; refusing"));
     }
     Ok(styles.replacen(block, &patched, 1))
+}
+
+/// Make ui_ground_hud.inc load the pet page from ui_ground_hud_pet.inc: the
+/// inline `<Page Name='pet'>` block (a direct child of GroundHUD in stock) is
+/// replaced by `<include>ui_ground_hud_pet.inc</include>` at the same
+/// indentation.  A hud that already has the include comes back unchanged.
+pub fn patch_hud_pet(hud: &str) -> Result<String, String> {
+    let include_re = Regex::new(r"(?i)<include>\s*ui_ground_hud_pet\.inc\s*</include>").unwrap();
+    if include_re.is_match(hud) {
+        return Ok(hud.to_string());
+    }
+    // every tag; Page opens/closes drive the depth count
+    let tag_re = Regex::new(r"(?s)<(/?)([A-Za-z]+)(\s[^<>]*?)?(/?)>").unwrap();
+    let name_re = Regex::new(r"(?i)\sName='pet'").unwrap();
+    let mut start = None;
+    let mut depth = 0usize;
+    for m in tag_re.captures_iter(hud) {
+        let closing = &m[1] == "/";
+        let self_closing = &m[4] == "/";
+        let attrs = m.get(3).map_or("", |a| a.as_str());
+        if &m[2] != "Page" {
+            continue;
+        }
+        let whole = m.get(0).unwrap();
+        match start {
+            None => {
+                if !closing && !self_closing && name_re.is_match(attrs) {
+                    start = Some(whole.start());
+                    depth = 1;
+                }
+            }
+            Some(begin) => {
+                if closing {
+                    depth -= 1;
+                    if depth == 0 {
+                        let line_start = hud[..begin].rfind('\n').map_or(0, |i| i + 1);
+                        if !hud[line_start..begin].trim().is_empty() {
+                            return Err("pet page in ui_ground_hud.inc does not start its own line".into());
+                        }
+                        return Ok(format!(
+                            "{}<include>ui_ground_hud_pet.inc</include>{}",
+                            &hud[..begin],
+                            &hud[whole.end()..]
+                        ));
+                    }
+                } else if !self_closing {
+                    depth += 1;
+                }
+            }
+        }
+    }
+    Err("no <Page Name='pet'> block in ui_ground_hud.inc; the game's hud may have changed".into())
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -317,6 +379,7 @@ pub fn remove(app_dir: &Path, game_dir_override: Option<&str>, force: bool) -> R
             .iter()
             .chain([&templates::TOOLBAR, &templates::SIDE_TOOLBAR])
             .map(|f| format!("ui\\{f}"))
+            .chain([HUD_FILE.to_string()])
             .collect(),
     };
     let mut log = Vec::new();
@@ -331,12 +394,24 @@ pub fn remove(app_dir: &Path, game_dir_override: Option<&str>, force: bool) -> R
             continue;
         }
         if !force {
-            if let Some(expected) = manifest.as_ref().and_then(|m| m.files.get(&rel)) {
-                let actual = sha256_file(&target).map_err(|e| e.to_string())?;
-                if &actual != expected {
-                    log.push(format!("{rel} differs from what we wrote - leaving it (use Force)"));
-                    continue;
+            match manifest.as_ref().and_then(|m| m.files.get(&rel)) {
+                Some(expected) => {
+                    let actual = sha256_file(&target).map_err(|e| e.to_string())?;
+                    if &actual != expected {
+                        log.push(format!("{rel} differs from what we wrote - leaving it (use Force)"));
+                        continue;
+                    }
                 }
+                // no manifest: only touch a hud that is exactly our patched stock one,
+                // never another mod's (which we would have backed up, had we installed over it)
+                None if rel == HUD_FILE && !backup.exists() => {
+                    let ours = patch_hud_pet(templates::STOCK_HUD).map(String::into_bytes).unwrap_or_default();
+                    if std::fs::read(&target).map(|b| b != ours).unwrap_or(true) {
+                        log.push(format!("{rel} is not ours - leaving it (use Force)"));
+                        continue;
+                    }
+                }
+                None => {}
             }
         }
         if backup.exists() {
@@ -367,7 +442,7 @@ mod tests {
     #[test]
     fn render_default_has_no_tokens() {
         let r = render(&Settings { role_colors: false, ..Settings::default() }, None).unwrap();
-        assert_eq!(r.files.len(), 8);
+        assert_eq!(r.files.len(), 9);
         for (_, b) in &r.files {
             assert!(!String::from_utf8_lossy(b).contains("@@"));
         }
@@ -395,10 +470,38 @@ mod tests {
     }
 
     #[test]
+    fn hud_pet_include() {
+        let stock = templates::STOCK_HUD;
+        assert!(!stock.contains("ui_ground_hud_pet.inc"));
+        assert_eq!(stock.matches("Name='pet'").count(), 1);
+        let patched = patch_hud_pet(stock).unwrap();
+        assert!(!patched.contains("Name='pet'"), "inline pet page removed");
+        assert_eq!(patched.matches("<include>ui_ground_hud_pet.inc</include>").count(), 1);
+        // the include takes the block's place: GroundHUD's first child, same indentation
+        let idx = patched.find("<include>ui_ground_hud_pet.inc</include>").unwrap();
+        assert!(patched[..idx].ends_with("\t\t"), "keeps the block's indentation");
+        assert!(patched[..idx].contains("Name='GroundHUD'"));
+        assert!(patched[idx..].contains("<include>ui_ground_hud_incap.inc</include>"));
+        let before = &stock[..stock.find("\t\t<Page").unwrap()];
+        assert!(patched.starts_with(before), "nothing before the block changed");
+        // everything from the next sibling on is untouched
+        let tail = &stock[stock.find("\t\t<Page\r\n\t\t\tAbsorbsInput='false'").unwrap()..];
+        assert!(patched.ends_with(tail), "nothing after the block changed");
+        // idempotent, and a hud that already includes the page is left alone
+        assert_eq!(patch_hud_pet(&patched).unwrap(), patched);
+        assert!(patch_hud_pet("<Page Name='GroundHUD'>\n</Page>").is_err());
+        // rendered output carries the patched hud (no loose hud in a game dir that does not exist)
+        let s = Settings { role_colors: false, game_dir: r"C:
+o-such-dir".into(), ..Settings::default() };
+        let r = render(&s, None).unwrap();
+        assert_eq!(r.files[HUD_FILE], patched.into_bytes());
+    }
+
+    #[test]
     fn render_without_action_bars_or_with_key_row() {
         let base = Settings { role_colors: false, ..Settings::default() };
         let r = render(&Settings { action_bars: false, ..base.clone() }, None).unwrap();
-        assert_eq!(r.files.len(), 6);
+        assert_eq!(r.files.len(), 7);
         let r = render(&Settings { action_bar_keybinds_inside: false, ..base }, None).unwrap();
         let tb = String::from_utf8_lossy(&r.files["ui\\ui_ground_hud_toolbar_skinned.inc"]);
         assert!(!tb.contains("TextAlignmentVertical='Top'"));
