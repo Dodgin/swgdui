@@ -27,19 +27,38 @@ pet bar).
   corner of the button (ElvUI) or in a row under the bar.  The pane number
   and prev / next buttons sit in a 14px column at the left, the big
   default-attack button is one more slot at the right.  Optional: a
-  1px-bordered backdrop panel (colour and opacity) and the client's queue
-  timer strip along the top, both off by default.  Everything the client
-  drives at runtime (sample widgets, highlight overlays, cooldown pies,
-  effectors) keeps its name and CodeData path; only positions and styles
-  changed.
+  1px-bordered backdrop panel (colour and opacity, off by default) and the
+  auto attack bar (the client's queue timer strip) along the top, on by
+  default.  Everything the client drives at runtime (sample widgets,
+  highlight overlays, cooldown pies, effectors) keeps its name and CodeData
+  path; only positions and styles changed.
+* Pet frame: the stock client builds the pet window inline in
+  `ui_ground_hud.inc` and never includes `ui_ground_hud_pet.inc`, so the
+  installer also writes a `ui_ground_hud.inc` with that block swapped for an
+  `<include>`.  It patches the loose hud already in the game dir if there is
+  one (a hud that already includes the pet page, e.g. Clean UI's, is written
+  back unchanged), else the bundled stock copy in
+  `templates/stock/ui_ground_hud.inc`.
+* Buff / debuff windows and the player frame's right-click menu are mutually
+  exclusive.  The client only attaches that menu (Lock / Unlock) to the player
+  frame when the icon rows are the frame's own children, as stock has them.
+  With the rows moved into their own windows (the default) a plain right-click
+  on the player frame does nothing: right-click it, drag off the frame, then
+  release.  Tick "Keep icon rows under the player frame" to get the normal
+  right-click back at the cost of placing the rows freely.  No other frame is
+  affected.
 * Role colours: the installer patches the role swatches in `ui_styles.inc`,
   working from the bundled stock copy in `templates/stock/ui_styles.inc`.
-  If the game ships a new `ui_styles.inc`, drop the fresh stock copy over
-  that file and rebuild.
+  If the game ships a new `ui_styles.inc` or `ui_ground_hud.inc`, drop the
+  fresh stock copy over the file under `templates/stock` and rebuild.
 * Settings (`settings.json`) and the install manifest (`installed.json`)
   live next to the exe.  Previous loose files are kept as
   `<file>.pre-unitframes`; Remove puts them back and refuses to touch a file
-  changed since install unless Force is ticked.
+  changed since install unless Force is ticked.  The manifest only records
+  what that copy of the exe installed, so Force sweeps every file the
+  installer can write, not just the recorded ones.  Remove never leaves a
+  `ui_ground_hud.inc` that includes a pet page which is no longer there: the
+  client will not start with a dangling include.
 
 ## Build
 

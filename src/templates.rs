@@ -63,3 +63,9 @@ pub fn get(file: &str, inline_buffs: bool, role_colors: bool) -> Option<&'static
 /// Stock `ui/ui_styles.inc`, the base the role-colour patch is applied to.
 /// Replace the file under templates/stock if the game ships a new one.
 pub const STOCK_STYLES: &str = include_str!("../templates/stock/ui_styles.inc");
+
+/// Stock `ui/ui_ground_hud.inc`.  The stock client defines the pet window
+/// inline in here and never includes ui_ground_hud_pet.inc, so the installer
+/// swaps that block for an `<include>` (`install::patch_hud_pet`).  Same
+/// replace-when-the-game-updates rule as STOCK_STYLES.
+pub const STOCK_HUD: &str = include_str!("../templates/stock/ui_ground_hud.inc");

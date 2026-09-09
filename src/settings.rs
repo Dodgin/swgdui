@@ -109,7 +109,7 @@ pub struct Settings {
     pub action_bar_backdrop_color: String,
     pub action_bar_backdrop_opacity: f64,
     pub action_bar_key_color: String,
-    /// the action-queue timer strip along the top of the bar
+    /// the auto attack bar (the client's action-queue timer strip) along the top of the bar
     pub action_bar_queue_bar: bool,
     /// keymap (.inp) the top-row / pet labels are read from; "" = newest in profiles/
     pub keymap_file: String,
@@ -144,7 +144,7 @@ impl Default for Settings {
             action_bar_backdrop_color: "#0F0F0F".into(),
             action_bar_backdrop_opacity: 0.8,
             action_bar_key_color: "#FFFFFF".into(),
-            action_bar_queue_bar: false,
+            action_bar_queue_bar: true,
             keymap_file: String::new(),
         }
     }
