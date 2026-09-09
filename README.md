@@ -1,5 +1,11 @@
 # dodgins-ui-mod
 
+### Use this nifty tool:
+![](resources/readme-2.png)
+
+### To make your SWG UI look like this:
+![](resources/readme-1.png)
+
 Single-exe installer with a live preview for Dodgin's ElvUI-style SWG
 unitframes (player, target, target-of-target / look-at target, group, pet,
 overhead nameplates, buff windows) and action bars (toolbar, double toolbar,
