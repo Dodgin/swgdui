@@ -1,0 +1,24 @@
+[package]
+name = "dodgins-ui-mod"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+description = "Installer + live preview for Dodgin's ElvUI-style SWG Legends unitframes"
+
+[[bin]]
+name = "dodgins-ui-mod"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.32", default-features = false, features = ["glow", "default_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+regex = "1"
+rfd = { version = "0.15", default-features = false, features = ["common-controls-v6"] }
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+strip = true

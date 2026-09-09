@@ -1,0 +1,116 @@
+# Build + test on every push / PR, and publish a GitHub release whenever the
+# version in Cargo.toml has no tag yet.  To ship: bump `version`, push to main.
+
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (windows)
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      tag_exists: ${{ steps.meta.outputs.tag_exists }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are needed to know whether this version is released
+
+      - name: Read version from Cargo.toml
+        id: meta
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          test -n "$version" || { echo "no version in Cargo.toml"; exit 1; }
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then exists=true; else exists=false; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$exists" >> "$GITHUB_OUTPUT"
+          echo "version $version, tag $tag exists: $exists"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release exe
+        run: cargo build --release --locked
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p out
+          cp target/release/dodgins-ui-mod.exe "out/dodgins-ui-mod-${{ steps.meta.outputs.tag }}-windows-x64.exe"
+          sha256sum out/*.exe > out/SHA256SUMS.txt
+          cat out/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dodgins-ui-mod-${{ steps.meta.outputs.tag }}-windows-x64
+          path: out/
+          if-no-files-found: error
+
+  release:
+    name: release ${{ needs.build.outputs.tag }}
+    needs: build
+    # only a real push to the default branch, and only for a version that has no tag yet
+    if: >-
+      github.event_name == 'push' &&
+      needs.build.outputs.tag_exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + tags for the changelog
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dodgins-ui-mod-${{ needs.build.outputs.tag }}-windows-x64
+          path: out
+
+      - name: Tag ${{ needs.build.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ needs.build.outputs.tag }}" -m "dodgins-ui-mod ${{ needs.build.outputs.version }}"
+          git push origin "${{ needs.build.outputs.tag }}"
+
+      - name: Release notes
+        shell: bash
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "${{ needs.build.outputs.tag }}^" 2>/dev/null || true)
+          {
+            echo "Dodgin's UI mod ${{ needs.build.outputs.version }} - installer and live preview for the ElvUI-style SWG Legends unitframes."
+            echo
+            echo "Download the exe, put it anywhere, run it. Settings are kept next to the exe."
+            echo
+            if [ -n "$prev" ]; then
+              echo "## Changes since $prev"
+              git log --no-merges --pretty='- %s' "$prev..${{ needs.build.outputs.tag }}"
+            fi
+          } > notes.md
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: dodgins-ui-mod ${{ needs.build.outputs.version }}
+          body_path: notes.md
+          files: |
+            out/*.exe
+            out/SHA256SUMS.txt
