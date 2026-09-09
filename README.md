@@ -39,6 +39,14 @@ pet bar).
   one (a hud that already includes the pet page, e.g. Clean UI's, is written
   back unchanged), else the bundled stock copy in
   `templates/stock/ui_ground_hud.inc`.
+* Buff / debuff windows and the player frame's right-click menu are mutually
+  exclusive.  The client only attaches that menu (Lock / Unlock) to the player
+  frame when the icon rows are the frame's own children, as stock has them.
+  With the rows moved into their own windows (the default) a plain right-click
+  on the player frame does nothing: right-click it, drag off the frame, then
+  release.  Tick "Keep icon rows under the player frame" to get the normal
+  right-click back at the cost of placing the rows freely.  No other frame is
+  affected.
 * Role colours: the installer patches the role swatches in `ui_styles.inc`,
   working from the bundled stock copy in `templates/stock/ui_styles.inc`.
   If the game ships a new `ui_styles.inc` or `ui_ground_hud.inc`, drop the
