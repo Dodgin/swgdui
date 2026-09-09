@@ -331,7 +331,28 @@ impl App {
         ui.add_space(6.0);
         ui.group(|ui| {
             ui.label(RichText::new("Buff / debuff icons").strong());
-            ui.checkbox(&mut self.s.inline_buffs, "Keep icon rows under the player frame (stock layout)");
+            ui.checkbox(&mut self.s.inline_buffs, "Keep icon rows under the player frame (stock layout)")
+                .on_hover_text(
+                    "On: the rows sit under the player frame the way stock has them, and the frame's\n\
+                     right-click menu works normally.\n\
+                     Off: the rows go into their own windows you can place anywhere, and the frame's\n\
+                     right-click menu needs the drag described below.",
+                );
+            if !self.s.inline_buffs {
+                ui.colored_label(
+                    Color32::from_rgb(0xE0, 0xB0, 0x40),
+                    "Separate buff windows stop the player frame's right-click menu opening on the spot.",
+                );
+                ui.label(
+                    RichText::new(
+                        "To lock or unlock the player frame: right-click it, drag the cursor off the frame, then release. \
+                         The client only wires that menu up when the icon rows live inside the frame, so ticking the box \
+                         above restores the normal right-click. Every other frame is unaffected.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
             ui.horizontal(|ui| {
                 ui.label("Icon size");
                 match self.client_icon_size() {
@@ -423,8 +444,8 @@ impl App {
                         ui.add(egui::Slider::new(&mut self.s.action_bar_backdrop_opacity, 0.0..=1.0).fixed_decimals(2));
                     });
                 });
-                ui.checkbox(&mut self.s.action_bar_queue_bar, "Queue timer bar along the top")
-                    .on_hover_text("The client's throttle bar: a strip in the action bar colour that fills while a queued ability waits\nfor the previous one to finish.  Off hides it.");
+                ui.checkbox(&mut self.s.action_bar_queue_bar, "Auto attack bar along the top")
+                    .on_hover_text("The client's throttle bar: a strip in the action bar colour that fills while a queued ability waits\nfor the previous one to finish.  On by default; off hides it.");
                 ui.label(RichText::new("Bars sit wherever you drag them in game.").weak().small());
             });
         });
